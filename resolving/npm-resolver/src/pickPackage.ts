@@ -241,6 +241,18 @@ export async function pickPackage (
         const modifiedDate = meta.modified ? new Date(meta.modified) : null
         const isModifiedValid = modifiedDate != null && !Number.isNaN(modifiedDate.getTime())
         if (!isModifiedValid || modifiedDate >= opts.publishedBy) {
+          // Save the abbreviated metadata to the abbreviated cache before re-fetching full.
+          if (!opts.dryRun) {
+            const abbreviatedJson = prepareJsonForDisk(fetchResult, cachedAt)
+            // Fire-and-forget save to the abbreviated cache path (pkgMirror).
+            runLimited(pkgMirror, (limit) => limit(async () => {
+              try {
+                await saveMeta(pkgMirror, abbreviatedJson)
+              } catch (err: any) { // eslint-disable-line
+                // We don't care if this file was not written to the cache
+              }
+            }))
+          }
           fetchResult = await ctx.fetch(spec.name, {
             authHeaderValue: opts.authHeaderValue,
             fullMetadata: true,
@@ -250,24 +262,14 @@ export async function pickPackage (
         }
       }
 
-      let jsonToSave: string | undefined
       if (ctx.filterMetadata) {
         meta = clearMeta(meta)
-      } else if (typeof fetchResult.jsonText === 'string') {
-        // Reuse the raw JSON text from the registry response to avoid re-stringifying.
-        // Inject cachedAt at the start of the JSON object. To be robust against BOMs or
-        // leading whitespace/newlines, locate the first '{' and splice after it.
-        const jsonText = fetchResult.jsonText
-        const firstBraceIndex = jsonText.indexOf('{')
-        if (firstBraceIndex !== -1) {
-          jsonToSave = `{"cachedAt":${cachedAt},${jsonText.slice(firstBraceIndex + 1)}`
-        }
       }
       meta.cachedAt = cachedAt
       // only save meta to cache, when it is fresh
       ctx.metaCache.set(cacheKey, meta)
       if (!opts.dryRun) {
-        const jsonForDisk = jsonToSave ?? JSON.stringify(meta)
+        const jsonForDisk = ctx.filterMetadata ? JSON.stringify(meta) : prepareJsonForDisk(fetchResult, cachedAt)
         runLimited(pkgMirror, (limit) => limit(async () => {
           try {
             await saveMeta(pkgMirror, jsonForDisk)
@@ -337,6 +339,16 @@ function encodePkgName (pkgName: string): string {
     return `${pkgName}_${createHexHash(pkgName)}`
   }
   return pkgName
+}
+
+function prepareJsonForDisk (fetchResult: FetchMetadataResult, cachedAt: number): string {
+  if (typeof fetchResult.jsonText === 'string') {
+    const firstBraceIndex = fetchResult.jsonText.indexOf('{')
+    if (firstBraceIndex !== -1) {
+      return `{"cachedAt":${cachedAt},${fetchResult.jsonText.slice(firstBraceIndex + 1)}`
+    }
+  }
+  return JSON.stringify({ ...fetchResult.meta, cachedAt })
 }
 
 function isMissingTimeError (err: unknown): boolean {
